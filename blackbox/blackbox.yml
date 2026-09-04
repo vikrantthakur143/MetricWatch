@@ -1,0 +1,84 @@
+# How blackbox_exporter probes. What it probes is in
+# prometheus/targets/blackbox-*.yml -- one file per probe job.
+#
+# Both are tracked and both ship ready to run. Nothing here is generated.
+#
+# Check it before restarting:
+#   docker run --rm -v "$PWD/blackbox:/etc/blackbox_exporter:ro" \
+#     prom/blackbox-exporter:v0.26.0 \
+#     --config.file=/etc/blackbox_exporter/blackbox.yml --config.check
+#
+# config-reload re-reads it on every `docker compose up -d`.
+
+modules:
+
+  # ICMP echo. The container needs NET_RAW for this; docker-compose.yml
+  # grants it, and without it every ICMP probe fails with a socket error.
+  icmp:
+    prober: icmp
+    timeout: 5s
+    icmp:
+      preferred_ip_protocol: ip4
+
+  # Opens a TCP connection and closes it again -- enough to tell a listening
+  # port from a refused or filtered one, without speaking the protocol. It
+  # says nothing about whether the service behind the port is healthy.
+  tcp_connect:
+    prober: tcp
+    timeout: 5s
+    tcp:
+      preferred_ip_protocol: ip4
+
+  http_2xx:
+    prober: http
+    timeout: 10s
+    http:
+      method: GET
+      valid_http_versions: [HTTP/1.1, HTTP/2.0]
+      follow_redirects: true
+      preferred_ip_protocol: ip4
+      tls_config:
+        # This stack serves self-signed certificates, so a verifying probe
+        # would fail on its own services every time. probe_ssl_earliest_cert_
+        # expiry is exported either way, so Blackbox.rules.yml still catches
+        # an expiry; what is given up is verification of the chain. Set this
+        # to false if every URL in blackbox-http.yml is publicly trusted.
+        insecure_skip_verify: true
+
+  # DNS. The target of a DNS probe is the RESOLVER being asked; the name it
+  # is asked for is query_name here.
+  #
+  # That split is not a choice -- blackbox reads query_name and query_type
+  # from the module and ignores them as probe parameters, so they cannot come
+  # from the target file however they are passed. The target file repeats
+  # them as labels, purely so a graph or an alert says which lookup it was.
+  # Change one here and change the matching label there.
+  #
+  # To watch a second name, copy this block under a new name and point a
+  # target line at it with `module: <that name>`.
+  dns_query:
+    prober: dns
+    timeout: 5s
+    dns:
+      query_name: google.com
+      query_type: A
+      transport_protocol: udp
+      preferred_ip_protocol: ip4
+      # NOERROR with an empty answer section is still a failure to resolve,
+      # so insist on getting at least one record back.
+      validate_answer_rrs:
+        fail_if_not_matches_regexp: [".+"]
+
+  # A second lookup, as an example. Uncomment, then add a line naming it in
+  # prometheus/targets/blackbox-dns.yml:
+  #
+  # dns_query_mx:
+  #   prober: dns
+  #   timeout: 5s
+  #   dns:
+  #     query_name: example.com
+  #     query_type: MX
+  #     transport_protocol: udp
+  #     preferred_ip_protocol: ip4
+  #     validate_answer_rrs:
+  #       fail_if_not_matches_regexp: [".+"]

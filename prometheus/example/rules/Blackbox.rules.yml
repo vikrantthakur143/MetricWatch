@@ -1,0 +1,101 @@
+# Alerts for the blackbox_exporter probes.
+#
+# The four probe jobs -- blackbox_icmp, blackbox_dns, blackbox_tcp and
+# blackbox_http -- all produce the same handful of series, so most of these
+# rules match on job=~"blackbox_.*" and let the instance label say what was
+# actually being probed.
+#
+#   probe_success                    1 if the probe passed
+#   probe_duration_seconds           how long it took
+#   probe_ssl_earliest_cert_expiry   unix time, https probes only
+#   probe_http_status_code           http probes only
+#
+# What is probed comes from BLACKBOX_*_TARGETS in .env.
+
+groups:
+  - name: Blackbox
+    rules:
+
+      # ------------------------------------------------------- availability
+      # for: 2m rather than 0m because a single lost ICMP packet or one
+      # refused connection is normal on any real network. Two minutes of
+      # consecutive failures is not.
+      - alert: BlackboxProbeFailed
+        expr: probe_success{job=~"blackbox_.*"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Probe failed: {{ $labels.instance }} ({{ $labels.job }})"
+          description: >-
+            blackbox_exporter has been unable to reach {{ $labels.instance }}
+            for 2 minutes. Check the probe by hand:
+            curl -s "http://blackbox-exporter:9115/probe?target={{ $labels.instance }}&module=<module>&debug=true"
+
+      # A probe that is passing but crawling is the early warning the failure
+      # alert above cannot give. Compared against the job timeout rather than
+      # a fixed number so it stays right if the timeouts are retuned.
+      - alert: BlackboxProbeSlow
+        expr: probe_duration_seconds{job=~"blackbox_.*"} > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Probe slow: {{ $labels.instance }} took {{ $value | printf \"%.1f\" }}s"
+          description: >-
+            {{ $labels.instance }} has answered {{ $labels.job }} probes in
+            more than 5 seconds for 10 minutes.
+
+      # Every probe job scrapes blackbox_exporter itself, so if the exporter
+      # is down every probe above goes stale rather than failing. Catch that
+      # separately, or an outage looks like silence.
+      - alert: BlackboxExporterDown
+        expr: up{job="blackbox_exporter"} == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "blackbox_exporter is not answering"
+          description: >-
+            Prometheus cannot scrape blackbox_exporter, so no probe is
+            running. Nothing in this file can fire while that is true.
+
+      # --------------------------------------------------------------- http
+      - alert: BlackboxHttpBadStatus
+        expr: probe_http_status_code >= 400
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} answers HTTP {{ $value }}"
+          description: >-
+            The URL is reachable but returning an error status. A 401 here
+            usually means the probe needs credentials, not that the service
+            is broken.
+
+      # ---------------------------------------------------------------- TLS
+      # The probes run with insecure_skip_verify, so an expiry is not caught
+      # by the probe failing -- it has to be checked directly. 21 days is
+      # three renewal attempts of headroom for a 90-day Let us Encrypt cert.
+      - alert: BlackboxSslCertExpiringSoon
+        expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 21
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Certificate for {{ $labels.instance }} expires in {{ $value | printf \"%.0f\" }} days"
+          description: >-
+            Renew it, or the probe starts failing when it lapses. A
+            self-signed certificate from bootstrap is issued for CERT_DAYS
+            days and will not trip this.
+
+      - alert: BlackboxSslCertExpired
+        expr: (probe_ssl_earliest_cert_expiry - time()) <= 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Certificate for {{ $labels.instance }} has expired"
+          description: >-
+            Browsers and API clients are refusing this endpoint now, even
+            though the probe itself still passes.

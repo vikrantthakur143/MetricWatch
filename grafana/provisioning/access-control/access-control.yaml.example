@@ -1,0 +1,68 @@
+# Role-based access control, provisioned from disk.
+#
+# Copy to access-control.yaml to switch it on:
+#
+#     cp access-control.yaml.example access-control.yaml
+#     docker compose restart grafana
+#
+# Grafana only reads .yaml/.yml here, so this file is inert until copied.
+#
+# IMPORTANT: custom roles are a Grafana Enterprise / Cloud feature. On the
+# OSS image this stack uses (grafana/grafana), Grafana logs that RBAC is not
+# available and ignores the file. It is here as a template for an Enterprise
+# licence, and because assigning FIXED roles to a team is the one part that
+# is worth knowing about either way.
+#
+# On OSS, permissions come from the three built-in org roles instead --
+# Viewer, Editor and Admin. auto_assign_org_role in grafana.ini decides which
+# one a new user gets, and this stack sets it to Viewer.
+
+apiVersion: 2
+
+# ------------------------------------------------------------- custom roles
+roles:
+  - name: 'custom:metricwatch:dashboard-reader'
+    description: >-
+      Read dashboards and query datasources, nothing else. Narrower than the
+      built-in Viewer, which can also see users, annotations and folders.
+    version: 1
+    orgId: 1
+    permissions:
+      - action: 'dashboards:read'
+        scope: 'dashboards:*'
+      - action: 'folders:read'
+        scope: 'folders:*'
+      - action: 'datasources:query'
+        scope: 'datasources:*'
+    # Who gets this role.
+    from:
+      - name: 'basic:viewer'
+        global: true
+
+  - name: 'custom:metricwatch:silence-manager'
+    description: Acknowledge alerts without being able to edit the rules.
+    version: 1
+    orgId: 1
+    permissions:
+      - action: 'alert.silences:create'
+      - action: 'alert.silences:write'
+      - action: 'alert.instances:read'
+
+# ------------------------------------------------------------- assignments
+# Grant a role to a team. This part is the most useful in practice: the
+# fixed: roles below ship with Grafana, so nothing custom is needed.
+teams:
+  - name: oncall
+    orgId: 1
+    roles:
+      - name: 'fixed:alerting.instances:writer'
+        global: true
+      - name: 'custom:metricwatch:silence-manager'
+        orgId: 1
+
+# Grant a role to every user with a given built-in role.
+#
+# builtInRoles:
+#   - name: 'custom:metricwatch:dashboard-reader'
+#     orgId: 1
+#     builtInRole: 'Viewer'

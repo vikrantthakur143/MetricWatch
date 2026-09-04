@@ -1,0 +1,38 @@
+#
+# Generated from an Ansible-managed source; edit there, not here.
+#
+
+groups:
+  - name: Ping Monitoring
+    rules:
+    - alert: Ping
+      expr: ping_loss_ratio == 1
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: Server ping not responding
+        description: Server ping not responding
+    - alert: InputErrorsTooHigh
+      expr: (rate(ifInErrors[10m])) / (rate(ifHCInUcastPkts[10m]) + rate(ifHCInBroadcastPkts[10m])
+        +  rate(ifHCInMulticastPkts[10m]) ) > 0.05
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: The interface {{$labels.alias}}:{{$labels.ifName}}  5% input errors ratio
+        description: The interface {{$labels.alias}}:{{$labels.ifName}} with a description
+          {{$labels.ifAlias}} has {{$value | printf "%.3f"}} > 5% input errors ratio in
+          input
+    - alert: OutputErrorsTooHigh
+      expr: (rate(ifOutErrors[10m])) / (rate(ifHCOutUcastPkts[10m]) + rate(ifHCOutBroadcastPkts[10m])
+        + rate(ifHCOutMulticastPkts[10m]) ) > 0.05
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: The interface {{$labels.alias}}:{{$labels.ifName}}  5% output errors
+          ratio
+        description: The interface {{$labels.alias}}:{{$labels.ifName}} with a description
+          {{$labels.ifAlias}} has {{$value | printf "%.3f"}} > 5% output errors ratio
+

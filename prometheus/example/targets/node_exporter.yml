@@ -1,0 +1,15 @@
+# Targets for the node_exporter job.
+#
+# The container in this compose file reports on the Docker host. Add your own
+# node_exporter hosts below; each has to accept the same scheme and the same
+# credentials as the job in prometheus.yml, which is http with basic auth.
+#
+# On a link you do not trust that is not good enough -- put the remote
+# exporter behind TLS, which it does with the same --web.config.file
+# Prometheus uses, and give it a job of its own with scheme https.
+
+- labels:
+    hostname: docker-host
+    os: linux
+  targets:
+  - node-exporter:9100

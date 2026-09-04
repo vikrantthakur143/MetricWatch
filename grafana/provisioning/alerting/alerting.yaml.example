@@ -1,0 +1,119 @@
+# Grafana unified alerting, provisioned from disk.
+#
+# Copy to alerting.yaml to switch it on:
+#
+#     cp alerting.yaml.example alerting.yaml
+#     docker compose restart grafana
+#
+# Grafana only reads .yaml/.yml here, so this file is inert until copied.
+#
+# This is SEPARATE from the Prometheus alert rules in prometheus/rules/.
+# Those 92 rules are evaluated by Prometheus and routed by Alertmanager; the
+# rules below are evaluated by Grafana itself. Provisioning both means an
+# alert can fire twice, so use this for things Prometheus cannot express --
+# panel-level thresholds, or a query that spans two datasources.
+#
+# Provisioned objects are read-only in the UI. To edit them there instead,
+# delete the file and restart. Changing `uid` creates a new object rather
+# than updating the old one; deleting an object needs `deleteRules` below,
+# because removing it from this file alone leaves it in the database.
+
+apiVersion: 1
+
+# ------------------------------------------------------------------ folders
+# Alert rules live in a folder. Create it here so the rule group can name it.
+groups:
+  - orgId: 1
+    name: metricwatch-grafana
+    folder: MetricWatch
+    # How often every rule in this group is evaluated.
+    interval: 1m
+    rules:
+      - uid: mw-grafana-datasource-down
+        title: Prometheus datasource unreachable from Grafana
+        condition: is_down
+        # Grafana evaluates each element in order; the last one named by
+        # `condition` decides whether the alert fires.
+        data:
+          - refId: up_query
+            relativeTimeRange:
+              from: 300
+              to: 0
+            # Must match the datasource UID, not its name. Look it up with:
+            #   curl -sk -u <user>:<pw> https://localhost:3000/api/datasources
+            # or set a uid: field in the datasource provisioning file.
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              refId: up_query
+              expr: up{job="prometheus"}
+              instant: true
+          - refId: is_down
+            datasourceUid: __expr__
+            model:
+              refId: is_down
+              type: threshold
+              expression: up_query
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        # How long the condition must hold before the alert leaves Pending.
+        for: 5m
+        # noData / error handling: OK, Alerting or NoData.
+        noDataState: Alerting
+        execErrState: Alerting
+        labels:
+          severity: critical
+          source: grafana
+        annotations:
+          summary: Grafana cannot reach the Prometheus datasource
+          description: >-
+            The up{job="prometheus"} series is missing or zero when queried
+            through Grafana. Prometheus itself may be fine -- check the
+            datasource credentials in
+            grafana/provisioning/datasources/prometheus.yml first.
+
+# ---------------------------------------------------------- contact points
+contactPoints:
+  - orgId: 1
+    name: email-oncall
+    receivers:
+      - uid: mw-email-oncall
+        type: email
+        settings:
+          addresses: oncall@example.com
+          singleEmail: false
+        # Send a message when the alert stops firing, not only when it starts.
+        disableResolveMessage: false
+
+# ------------------------------------------------------- notification policy
+# The root policy is replaced wholesale, so everything Grafana sends is routed
+# by what follows. Grafana alerts only -- Prometheus alerts never reach here.
+policies:
+  - orgId: 1
+    receiver: email-oncall
+    group_by: [alertname, grafana_folder]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+      - receiver: email-oncall
+        object_matchers:
+          - [severity, =, critical]
+        group_wait: 0s
+
+# ------------------------------------------------------------- mute timings
+muteTimes:
+  - orgId: 1
+    name: weekend
+    time_intervals:
+      - weekdays: ['saturday', 'sunday']
+        location: Asia/Kolkata
+
+# ---------------------------------------------------------------- deleting
+# Removing a rule from this file does not remove it from Grafana. List it
+# here to actually delete it, then remove both entries on the next pass.
+#
+# deleteRules:
+#   - orgId: 1
+#     uid: mw-grafana-datasource-down

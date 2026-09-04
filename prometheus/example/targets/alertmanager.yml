@@ -1,0 +1,11 @@
+# Targets for the alertmanager job.
+#
+# The container in this compose file, addressed by name on the compose
+# network. Add another Alertmanager to scrape that one too; it has to serve
+# the same scheme and accept the same credentials as the job in
+# prometheus.yml.
+
+- labels:
+    hostname: docker-host
+  targets:
+  - alertmanager:9093

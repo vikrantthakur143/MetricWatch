@@ -1,0 +1,9 @@
+# Targets for the blackbox_http job. Full URLs.
+#
+# A URL that answers 2xx passes, so point this at endpoints that need no
+# login. The Grafana health endpoint is public; Prometheus and Alertmanager
+# want credentials on every path and would answer 401, which is why the TCP
+# probe covers those two instead.
+
+- targets:
+  - https://grafana:3000/api/health

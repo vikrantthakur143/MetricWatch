@@ -1,0 +1,8 @@
+# Every tracked file here is text read by Linux containers: Prometheus and
+# Alertmanager YAML, Grafana .ini/.toml, and the compose file. Pin LF so a
+# checkout on Windows cannot rewrite them to CRLF, regardless of whatever
+# core.autocrlf a given clone happens to have set.
+#
+# text=auto still auto-detects binaries, so this stays safe if any are added.
+
+* text=auto eol=lf

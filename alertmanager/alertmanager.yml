@@ -1,0 +1,109 @@
+# Alertmanager routing, mute windows and receivers.
+#
+# This file is tracked, so the addresses below are placeholders -- put your
+# own in and take care not to commit them. The SMTP password is NOT here; it
+# lives in secrets/alertmanager/smtp_password.
+#
+# Check it before restarting:
+#   docker run --rm -v "$PWD/alertmanager:/c:ro" --entrypoint amtool \
+#     prom/alertmanager:v0.28.0 check-config /c/alertmanager.yml
+
+global:
+  resolve_timeout: 5m
+  # Refuse to hand the message to a smarthost that will not start TLS. Without
+  # this a downgrade leaks the SMTP password and the alert body in cleartext.
+  smtp_require_tls: true
+
+route:
+  # Group by the alert and the host it came from. Grouping on alertname alone
+  # collapses one failure across every machine into a single notification, so
+  # the second and later hosts wait for group_interval before being mentioned.
+  group_by: [alertname, hostname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 1h
+  receiver: email
+  routes:
+  # Always-firing heartbeat (expr: vector(1)). It is severity critical, so this
+  # must stay above the critical route below -- sibling routes are first match
+  # wins. Repoint at a dead-man's-switch endpoint if one is ever set up.
+  - receiver: 'null'
+    matchers:
+      - alertname = PrometheusAlertmanagerE2eDeadManSwitch
+
+  - receiver: email
+    matchers:
+      - severity = critical
+    group_wait: 0m
+
+  - receiver: email
+    matchers:
+      - severity = warning
+    mute_time_intervals: [business_hours]
+    group_wait: 0m
+
+  - receiver: email
+    matchers:
+      - severity = info
+    mute_time_intervals: [non_business_hours]
+    group_wait: 0m
+
+inhibit_rules:
+  # While a critical alert is firing, hold back the warning for the same alert
+  # on the same target. The equal list must name labels that actually exist
+  # here, or every alert matches every other one: a label missing from both
+  # sides compares equal.
+  - source_matchers:
+      - severity = critical
+    target_matchers:
+      - severity = warning
+    equal: [alertname, instance]
+
+time_intervals:
+  - name: business_hours
+    time_intervals:
+    - location: Asia/Kolkata
+      weekdays: ['monday:friday']
+      times:
+      - start_time: '10:00'
+        end_time: '18:00'
+    - location: Asia/Kolkata
+      weekdays: [saturday]
+      times:
+      - start_time: '10:00'
+        end_time: '14:00'
+
+  - name: non_business_hours
+    time_intervals:
+    - location: Asia/Kolkata
+      weekdays: ['monday:friday']
+      times:
+      - start_time: '00:00'
+        end_time: '10:00'
+      - start_time: '18:00'
+        end_time: '24:00'
+    - location: Asia/Kolkata
+      weekdays: [saturday, sunday]
+
+receivers:
+  # Discards notifications. Nothing is sent for alerts routed here.
+  - name: 'null'
+
+  - name: email
+    email_configs:
+    - to: oncall@example.com
+      from: alertmanager@example.com
+      hello: example.com
+      smarthost: smtp.example.com:587
+      auth_username: alertmanager@example.com
+      auth_identity: alertmanager@example.com
+      auth_password_file: /run/secrets/alertmanager/smtp_password
+      send_resolved: true
+      # Verify the smarthost certificate. Turning this off would let anything
+      # that can intercept port 587 collect the SMTP password. Set
+      # insecure_skip_verify only for an internal relay with a private CA, and
+      # prefer pointing ca_file at that CA instead.
+      tls_config:
+        insecure_skip_verify: false
+        # ca_file: /run/secrets/alertmanager/smtp_ca.pem
+        # server_name: smtp.example.com

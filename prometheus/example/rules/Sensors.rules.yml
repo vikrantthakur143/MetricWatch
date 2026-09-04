@@ -1,0 +1,111 @@
+# Alerts for the sensors job.
+#
+# Metric shape:
+#   sensor_data{sensor="dht22",location="sansal",area="outside",type="temperature"} 21.20
+#   sensor_data{sensor="dht22",location="sansal",area="outside",type="humidity"}   100.00
+#
+# The thresholds below are deliberately wide -- they catch a broken sensor or
+# a genuinely dangerous reading, not "warmer than I would like". Narrow them
+# per location with an added label selector rather than editing these, so a
+# greenhouse and a server room can differ.
+
+groups:
+  - name: Sensors
+    rules:
+
+      # ---------------------------------------------------------- liveness
+      - alert: SensorTargetDown
+        expr: up{job="sensors"} == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Sensor endpoint {{ $labels.instance }} is unreachable"
+          description: >-
+            Prometheus cannot scrape {{ $labels.instance }}. A microcontroller
+            that has crashed or lost wifi looks exactly like this.
+
+      # A board can answer /metrics while its sensor has stopped responding,
+      # so absence of the series matters as much as absence of the target.
+      - alert: SensorNoData
+        expr: |
+          absent(sensor_data) == 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No sensor_data series at all"
+          description: >-
+            Nothing has reported sensor_data for 10 minutes. Either every
+            board is down or the sensors job is misconfigured.
+
+      # The value is still served but has not moved. A DHT22 reporting an
+      # identical reading to two decimal places for an hour has failed;
+      # genuine air temperature never sits that still.
+      - alert: SensorReadingStuck
+        expr: |
+          stddev_over_time(sensor_data[1h]) == 0
+          and count_over_time(sensor_data[1h]) > 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.sensor }} {{ $labels.type }} at {{ $labels.location }}/{{ $labels.area }} is stuck"
+          description: >-
+            {{ $labels.type }} has not changed at all for an hour
+            (value {{ $value }}). The sensor is probably faulty or
+            disconnected.
+
+      # ------------------------------------------------------- plausibility
+      # A DHT22 reads -40..80C and 0..100% RH. Anything outside that is the
+      # sensor failing, not the weather.
+      - alert: SensorReadingImplausible
+        expr: |
+          (sensor_data{type="temperature"} < -40 or sensor_data{type="temperature"} > 80)
+          or (sensor_data{type="humidity"} < 0 or sensor_data{type="humidity"} > 100)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.sensor }} at {{ $labels.location }}/{{ $labels.area }} reports an impossible {{ $labels.type }}"
+          description: >-
+            {{ $labels.type }} reads {{ $value }}, outside what the hardware
+            can measure. Check wiring and the pull-up resistor.
+
+      # Saturated humidity is a real reading outdoors in rain or fog, but
+      # indoors it means condensation -- and a DHT22 pinned at exactly 100
+      # for hours is usually wet rather than accurate.
+      - alert: SensorHumiditySaturated
+        expr: sensor_data{type="humidity"} >= 100
+        for: 2h
+        labels:
+          severity: info
+        annotations:
+          summary: "Humidity saturated at {{ $labels.location }}/{{ $labels.area }}"
+          description: >-
+            Humidity has read 100% for two hours. Expected outdoors in fog or
+            rain; indoors it means condensation on the sensor.
+
+      # ---------------------------------------------------------- comfort
+      # Wide bounds meant to catch heating or cooling that has failed.
+      - alert: SensorTemperatureHigh
+        expr: sensor_data{type="temperature"} > 45
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.location }}/{{ $labels.area }} is {{ $value }}C"
+          description: >-
+            Temperature above 45C for 15 minutes. In an enclosed space this
+            usually means ventilation or cooling has stopped.
+
+      - alert: SensorTemperatureBelowFreezing
+        expr: sensor_data{type="temperature"} < 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.location }}/{{ $labels.area }} is below freezing ({{ $value }}C)"
+          description: >-
+            Temperature below 0C for 15 minutes. Relevant where pipes,
+            batteries or plants are involved.

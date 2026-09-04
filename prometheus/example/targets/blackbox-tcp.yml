@@ -1,0 +1,10 @@
+# Targets for the blackbox_tcp job. host:port per line.
+#
+# These are the ports the containers listen on INSIDE the network, which are
+# not the published ports in .env: a probe from in here reaches grafana:3000
+# whatever GRAFANA_PORT happens to be.
+
+- targets:
+  - grafana:3000
+  - prometheus:9090
+  - alertmanager:9093

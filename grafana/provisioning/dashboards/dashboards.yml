@@ -1,0 +1,19 @@
+# Real provider. The sample.yaml beside this file is the upstream example and
+# stays commented out.
+#
+# Dashboards are loaded read-only from /etc/grafana/dashboards, which is bound
+# to ./grafana/dashboards. allowUiUpdates is false, so edits made in the UI are
+# not written back -- change the JSON file instead.
+
+apiVersion: 1
+
+providers:
+  - name: default
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards

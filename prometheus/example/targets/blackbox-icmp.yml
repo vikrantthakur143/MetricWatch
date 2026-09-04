@@ -1,0 +1,10 @@
+# Targets for the blackbox_icmp job. One host per line.
+#
+# NOTE: localhost here is the blackbox container itself, which proves the
+# prober works and nothing else. To ping the machine running Docker, use its
+# LAN address.
+
+- targets:
+  - localhost
+  - 8.8.8.8
+  - 8.8.4.4

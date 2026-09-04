@@ -1,0 +1,11 @@
+# Targets for the grafana job.
+#
+# Grafana serves /metrics from the same TLS listener as the UI and does not
+# ask for a login on it, so the job carries no credentials. Set
+# [metrics] basic_auth_username and basic_auth_password in grafana.ini to
+# change that, and add a matching basic_auth block to the job.
+
+- labels:
+    hostname: docker-host
+  targets:
+  - grafana:3000

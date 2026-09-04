@@ -1,0 +1,8 @@
+# Targets for the blackbox_exporter job -- the exporter reporting on itself,
+# which is separate from the probes it runs. Those are the four blackbox-*
+# files beside this one.
+
+- labels:
+    hostname: docker-host
+  targets:
+  - blackbox-exporter:9115

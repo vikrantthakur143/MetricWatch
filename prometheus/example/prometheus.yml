@@ -1,0 +1,286 @@
+# Prometheus server config.
+#
+# Every job takes its targets from a list under targets/, and those lists are
+# tracked and ship ready to run: they name the containers in this compose
+# file, which is why a fresh clone comes up monitoring itself with nothing to
+# fill in first.
+#
+# That also means they are published files. Your own hostnames are a local
+# edit that must not be committed -- see the note about --skip-worktree in
+# README.md.
+#
+# Every file_sd block sets refresh_interval: 30s. Prometheus also watches
+# these files for changes, but that watch is inotify, which does not fire
+# through a bind mount on Docker Desktop -- so without an explicit interval a
+# new target can take the default five minutes to appear on Windows and macOS
+# while showing up instantly on Linux. Re-reading nine small files twice a
+# minute costs nothing next to that confusion.
+#
+# Check it before restarting:
+#   docker run --rm -v "$PWD/prometheus:/etc/prometheus:ro" \
+#     --entrypoint promtool prom/prometheus:v3.1.0 \
+#     check config --lint none /etc/prometheus/prometheus.yml
+#
+# config-reload re-reads it on every `docker compose up -d`.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 12s
+  evaluation_interval: 15s
+  # Stamped onto every series this server sends to Alertmanager or a remote
+  # endpoint. Without it, two Prometheus servers watching the same hosts
+  # produce alerts Alertmanager cannot tell apart.
+  external_labels:
+    monitor: metricwatch
+
+alerting:
+  alertmanagers:
+  # Alertmanager serves TLS and requires basic auth, so the notification path
+  # has to present both. The account is the file secrets/alertmanager_<user>
+  # -- keep it in step with ALERTMANAGER_WEB_USER in .env, which is what
+  # config-reload and this block both authenticate as.
+  - scheme: https
+    tls_config:
+      # The certificate is issued for the domain in .env, but Prometheus
+      # reaches Alertmanager by container name on the compose network, so the
+      # name will not match. Encrypted, authenticated, not verified.
+      insecure_skip_verify: true
+    basic_auth:
+      username: admin
+      password_file: /run/secrets/alertmanager_admin
+    static_configs:
+    - targets:
+      - alertmanager:9093
+
+
+rule_files:
+  - /etc/prometheus/rules/Alertmanager.rules.yml
+  - /etc/prometheus/rules/Prometheus.rules.yml
+  - /etc/prometheus/rules/NodeExporter.rules.yml
+  - /etc/prometheus/rules/WindowsExporter.rules.yml
+  - /etc/prometheus/rules/MysqldExporter.rules.yml
+  - /etc/prometheus/rules/Blackbox.rules.yml
+  - /etc/prometheus/rules/Ping.rules.yml
+  # Sensors.rules.yml is deliberately not loaded: there is no sensors job, so
+  # its absent(sensor_data) alert would fire and stay firing. Add this line
+  # back at the same time as a scrape job producing sensor_data.
+  #   - /etc/prometheus/rules/Sensors.rules.yml
+
+
+scrape_configs:
+  # Limits below are per job because a compromised or broken target can
+  # otherwise fill the TSDB: sample_limit caps series per scrape,
+  # label_limit caps labels per series, body_size_limit caps the response.
+  # A target that exceeds one is marked down instead of being ingested.
+
+  # ------------------------------------------------------------- the stack
+  # Prometheus scrapes itself through its own TLS listener, so a broken
+  # certificate or web.config shows up as a down target rather than passing
+  # unnoticed. The account is secrets/prometheus_<user>; keep the username in
+  # step with PROMETHEUS_WEB_USER in .env.
+  - job_name: prometheus
+    scrape_interval: 30s
+    metrics_path: /metrics
+    scheme: https
+    basic_auth:
+      username: admin
+      password_file: /run/secrets/prometheus_admin
+    tls_config:
+      # Reached by container name, not by the name on the certificate.
+      insecure_skip_verify: true
+    sample_limit: 5000
+    label_limit: 30
+    body_size_limit: 10MB
+    file_sd_configs:
+    - files:
+      - targets/prometheus.yml
+      refresh_interval: 30s
+
+
+  - job_name: alertmanager
+    scrape_interval: 30s
+    metrics_path: /metrics
+    scheme: https
+    basic_auth:
+      username: admin
+      password_file: /run/secrets/alertmanager_admin
+    tls_config:
+      insecure_skip_verify: true
+    sample_limit: 5000
+    label_limit: 30
+    body_size_limit: 10MB
+    file_sd_configs:
+    - files:
+      - targets/alertmanager.yml
+      refresh_interval: 30s
+
+
+  # Grafana serves /metrics from the same TLS listener as the UI, and does not
+  # require a login for it -- which is why this job carries no credentials
+  # while the two above do. Set [metrics] basic_auth_username and
+  # basic_auth_password in grafana.ini to change that, and add a basic_auth
+  # block here to match.
+  - job_name: grafana
+    scrape_interval: 30s
+    metrics_path: /metrics
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    # Grafana exposes roughly 900 series, most of them histogram buckets.
+    sample_limit: 5000
+    label_limit: 30
+    body_size_limit: 10MB
+    file_sd_configs:
+    - files:
+      - targets/grafana.yml
+      refresh_interval: 30s
+
+
+  - job_name: blackbox_exporter
+    scrape_interval: 30s
+    metrics_path: /metrics
+    scheme: http
+    sample_limit: 5000
+    label_limit: 30
+    body_size_limit: 10MB
+    file_sd_configs:
+    - files:
+      - targets/blackbox_exporter.yml
+      refresh_interval: 30s
+
+
+  # ------------------------------------------------------------ node metrics
+  # The container in this compose file publishes no port, so it is reachable
+  # only from this network and needs no credentials; the basic_auth below is
+  # for the remote hosts you add to the target list, and a node_exporter that
+  # does not ask for it simply ignores the header.
+  #
+  # WARNING: http, so that password crosses the network in cleartext (base64
+  # is not encryption) and so do the metrics. Acceptable on the compose
+  # network, not on a link you do not trust. Put a remote node_exporter
+  # behind TLS -- it takes the same --web.config.file Prometheus does -- and
+  # move it to a job of its own with scheme: https.
+  - job_name: node_exporter
+    scrape_interval: 30s
+    metrics_path: /metrics
+    scheme: http
+    basic_auth:
+      username: node-scraper
+      password_file: /run/secrets/prometheus/scrape_node_password
+    # node_exporter reports roughly 1000-1500 series on a typical host; this
+    # leaves room for textfile collectors without letting one host run away.
+    sample_limit: 5000
+    label_limit: 30
+    body_size_limit: 10MB
+    file_sd_configs:
+    - files:
+      - targets/node_exporter.yml
+      refresh_interval: 30s
+
+
+  # ----------------------------------------------------------- blackbox probes
+  # A probe job scrapes blackbox_exporter, not the thing being probed. The
+  # relabel block below is what makes that work, and it is the same in all
+  # four jobs:
+  #
+  #   1. the target from the list becomes the ?target= parameter
+  #   2. instance is set from it, so the series is labelled with what was
+  #      probed rather than with blackbox_exporter
+  #   3. __address__ is then rewritten to blackbox_exporter, which is where
+  #      the scrape is actually sent
+  #
+  # Which module runs is fixed per job here, except for DNS -- see below.
+  # The modules themselves are in blackbox/blackbox.yml.
+
+  - job_name: blackbox_icmp
+    scrape_interval: 30s
+    metrics_path: /probe
+    params:
+      module: [icmp]
+    sample_limit: 500
+    label_limit: 15
+    body_size_limit: 64KB
+    file_sd_configs:
+    - files:
+      - targets/blackbox-icmp.yml
+      refresh_interval: 30s
+    relabel_configs:
+    - source_labels: [__address__]
+      target_label: __param_target
+    - source_labels: [__param_target]
+      target_label: instance
+    - target_label: __address__
+      replacement: blackbox-exporter:9115
+
+
+  # DNS takes its module from the target list rather than fixing one here, so
+  # that watching a second name is a new module plus a new target line and no
+  # change to this file. __address__ is the resolver being asked, which is
+  # what instance ends up naming; query_name and query_type ride along as
+  # labels describing the module that ran.
+  - job_name: blackbox_dns
+    scrape_interval: 30s
+    metrics_path: /probe
+    sample_limit: 500
+    label_limit: 15
+    body_size_limit: 64KB
+    file_sd_configs:
+    - files:
+      - targets/blackbox-dns.yml
+      refresh_interval: 30s
+    relabel_configs:
+    - source_labels: [__address__]
+      target_label: __param_target
+    - source_labels: [__param_target]
+      target_label: instance
+    - source_labels: [module]
+      target_label: __param_module
+    # module has done its job as a parameter; keep it off the series.
+    - action: labeldrop
+      regex: module
+    - target_label: __address__
+      replacement: blackbox-exporter:9115
+
+
+  - job_name: blackbox_tcp
+    scrape_interval: 30s
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    sample_limit: 500
+    label_limit: 15
+    body_size_limit: 64KB
+    file_sd_configs:
+    - files:
+      - targets/blackbox-tcp.yml
+      refresh_interval: 30s
+    relabel_configs:
+    - source_labels: [__address__]
+      target_label: __param_target
+    - source_labels: [__param_target]
+      target_label: instance
+    - target_label: __address__
+      replacement: blackbox-exporter:9115
+
+
+  - job_name: blackbox_http
+    scrape_interval: 30s
+    # A slow site must not stall the scrape; blackbox gives up first.
+    scrape_timeout: 15s
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    sample_limit: 500
+    label_limit: 15
+    body_size_limit: 64KB
+    file_sd_configs:
+    - files:
+      - targets/blackbox-http.yml
+      refresh_interval: 30s
+    relabel_configs:
+    - source_labels: [__address__]
+      target_label: __param_target
+    - source_labels: [__param_target]
+      target_label: instance
+    - target_label: __address__
+      replacement: blackbox-exporter:9115

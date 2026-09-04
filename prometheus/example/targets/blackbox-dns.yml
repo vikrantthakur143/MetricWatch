@@ -1,0 +1,21 @@
+# Targets for the blackbox_dns job.
+#
+# The target of a DNS probe is the RESOLVER being asked, not the name being
+# looked up. 127.0.0.11 is the resolver Docker gives every container on a
+# user-defined network, so the first entry measures name resolution exactly
+# as this stack sees it, and the second compares a public resolver against it.
+#
+# module picks which block of blackbox/blackbox.yml runs, and that block is
+# where the name and the type actually live: blackbox reads query_name and
+# query_type from the module and ignores them as probe parameters, so they
+# cannot be set from here. The two labels below are labels only -- they put
+# the lookup on the graph and in the alert. Keep them in step with the module
+# they name.
+
+- labels:
+    module: dns_query
+    query_name: google.com
+    query_type: A
+  targets:
+  - 127.0.0.11:53
+  - 8.8.8.8:53

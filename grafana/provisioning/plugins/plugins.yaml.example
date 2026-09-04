@@ -1,0 +1,51 @@
+# App plugins, provisioned from disk.
+#
+# Copy to plugins.yaml to switch it on:
+#
+#     cp plugins.yaml.example plugins.yaml
+#     docker compose restart grafana
+#
+# Grafana only reads .yaml/.yml here, so this file is inert until copied.
+#
+# This file only ENABLES and configures an app plugin that is already
+# installed. It does not download anything. Installing is a separate step,
+# and this stack has no plugin volume beyond grafana-data, so a plugin
+# installed by hand in a running container is lost when it is recreated.
+#
+# To install one for real, either:
+#
+#   1. set GF_INSTALL_PLUGINS on the grafana service in docker-compose.yml --
+#      it installs on every start, so it survives a recreate:
+#
+#        environment:
+#          GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-piechart-panel
+#
+#   2. or bake them into an image built FROM grafana/grafana.
+#
+# Panel and datasource plugins need no entry here at all -- they work as soon
+# as they are installed. Only *app* plugins are provisioned this way.
+
+apiVersion: 1
+
+apps:
+  # A worked example: the Zabbix app, which ships its own datasource, panels
+  # and dashboards. Install it first, or Grafana logs "plugin not found" and
+  # carries on without it.
+  - type: alexanderzobnin-zabbix-app
+    org_id: 1
+    disabled: false
+    jsonData:
+      # Plugin-specific settings. Whatever the plugin documents goes here.
+      trends: true
+      alerting: false
+    secureJsonData:
+      # Read from a file rather than written inline, the same way the
+      # datasource password is. Anything under secrets/grafana/ is mounted at
+      # /run/secrets/grafana/ and is gitignored.
+      apiToken: $__file{/run/secrets/grafana/zabbix_api_token}
+
+  # Enable an app that needs no configuration:
+  #
+  # - type: grafana-exploretraces-app
+  #   org_id: 1
+  #   disabled: false

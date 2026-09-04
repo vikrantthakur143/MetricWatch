@@ -1,0 +1,15 @@
+# Targets for the prometheus job.
+#
+# The container in this compose file, addressed by name on the compose
+# network. Every label here is attached to each metric scraped from these
+# targets, and hostname is what Alertmanager groups alerts by.
+#
+# Add another Prometheus server to scrape that one too. It has to serve the
+# same scheme and accept the same credentials as the job in prometheus.yml.
+#
+# Prometheus re-reads this file by itself: no restart, no reload.
+
+- labels:
+    hostname: docker-host
+  targets:
+  - prometheus:9090

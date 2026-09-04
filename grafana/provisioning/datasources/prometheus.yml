@@ -1,0 +1,35 @@
+# The Prometheus datasource, provisioned into Grafana at startup.
+#
+# Tracked, and ships ready to run against the accounts this stack creates by
+# default. Only two things in here are site-specific, and both name the same
+# account: basicAuthUser and the path in basicAuthPassword. Change them
+# together if PROMETHEUS_WEB_USER in .env is not admin -- that is a local
+# edit to a published file, so keep it out of git the same way as the rest:
+#
+#   git update-index --skip-worktree grafana/provisioning/datasources/prometheus.yml
+#
+# Grafana reads this once, at startup. Editing it needs a restart, not a
+# reload: docker compose restart grafana
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: https://prometheus:9090
+    isDefault: true
+    editable: true
+    basicAuth: true
+    # Both of these name the account secrets/prometheus_<user>. Replace admin
+    # with PROMETHEUS_WEB_USER from .env -- the path has to be written out
+    # literally, because Grafana refuses to start if a ${VAR} appears inside
+    # $__file{}.
+    basicAuthUser: admin
+    jsonData:
+      # Prometheus is reached by container name, which its certificate does
+      # not cover, so the name is not verified. Still encrypted, still
+      # authenticated.
+      tlsSkipVerify: true
+    secureJsonData:
+      basicAuthPassword: $__file{/run/secrets/prometheus_admin}

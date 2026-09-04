@@ -1,0 +1,357 @@
+# Prometheus + Alertmanager + Grafana
+#
+#   docker compose up -d
+#
+#   Prometheus    https://<domain>:9090   secrets/prometheus_<user>
+#   Alertmanager  https://<domain>:9093   secrets/alertmanager_<user>
+#   Grafana       https://<domain>:3000   secrets/grafana_<user>
+#
+# The domain, the usernames, ports, image versions, resource limits and the
+# network subnet all come from .env. Nothing in this file needs editing for
+# routine changes.
+#
+# Accounts are flat files in secrets/, named <service>_<username>, holding
+# that account's password. Prometheus and Alertmanager accept every file
+# matching their prefix; Grafana takes the single GRAFANA_ADMIN_USER.
+#
+# Each service serves TLS from certs/<service>/<domain>/, put there by the
+# bootstrap service according to CERT_MODE in .env: self-signed (the default),
+# copied from certbot, or provided by you. A service mounts only its own
+# directory, so none can read another's private key. Self-signed certificates
+# make browsers warn until you trust them locally.
+#
+# node-exporter and blackbox-exporter publish no ports. They are scraped over
+# the compose network and are not reachable from the host at all.
+#
+# Startup order is enforced with depends_on conditions:
+#
+#   bootstrap -----> prometheus ---------\
+#             \  /                        \
+#   config-init  \-> alertmanager ---------> config-reload
+#             \--> dashboard-init --> grafana
+#
+#   blackbox-exporter --------------------/
+#
+#   node-exporter and blackbox-exporter need nothing from either init step --
+#   their configs are tracked -- so both start straight away.
+
+services:
+
+  # --------------------------------------------------------------- bootstrap
+  # Generates per-service certificates and the web-auth configs, then exits.
+  bootstrap:
+    build: ./docker/toolbox
+    image: ${TOOLBOX_IMAGE}
+    container_name: bootstrap
+    entrypoint: ["/bin/sh", "/scripts/bootstrap.sh"]
+    working_dir: /work
+    environment:
+      CERTS_DIR: /work/certs
+      SECRETS_DIR: /work/secrets
+      # CERT_MODE is self-signed | certbot | provided -- see .env.
+      CERT_MODE: ${CERT_MODE}
+      CERT_DAYS: ${CERT_DAYS}
+      CERT_WARN_DAYS: ${CERT_WARN_DAYS}
+      CERTBOT_DIR: /letsencrypt
+      # The domain is the directory name under certs/<service>/, the CN and
+      # SAN of a self-signed cert, and the live/<domain> certbot copies from.
+      CERT_DOMAIN: ${CERT_DOMAIN}
+      CERT_DOMAIN_PROMETHEUS: ${CERT_DOMAIN_PROMETHEUS}
+      CERT_DOMAIN_ALERTMANAGER: ${CERT_DOMAIN_ALERTMANAGER}
+      CERT_DOMAIN_GRAFANA: ${CERT_DOMAIN_GRAFANA}
+      # bootstrap checks this account file exists, where the error is legible.
+      GRAFANA_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./certs:/work/certs
+      - ./secrets:/work/secrets
+      # Read-only view of the certbot root, used only when CERT_MODE=certbot.
+      # A bind mount cannot be made conditional, so CERTBOT_DIR defaults to
+      # ./certs -- a path that already exists and is ignored in other modes.
+      - ${CERTBOT_DIR}:/letsencrypt:ro
+    networks: [metricwatch]
+    restart: "no"
+    deploy:
+      resources:
+        limits: { cpus: "${INIT_CPU_LIMIT}", memory: "${INIT_MEM_LIMIT}" }
+
+  # ------------------------------------------------------------- config-init
+  # Puts prometheus.yml, the target lists and the rule files in place the
+  # first time this stack runs, then exits.
+  #
+  # Those three are yours to edit and are not tracked; prometheus/example/ is
+  # the tracked copy, and this is what turns it into a working Prometheus on
+  # a fresh clone. Once the TSDB has data in it the configuration is left
+  # alone, however it has been edited since. See scripts/init-config.sh.
+  config-init:
+    image: ${TOOLBOX_IMAGE}
+    container_name: config-init
+    entrypoint: ["/bin/sh", "/scripts/init-config.sh"]
+    working_dir: /work
+    environment:
+      CONFIG_DIR: /work/config
+      EXAMPLE_DIR: /work/config/example
+      TSDB_DIR: /tsdb
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./prometheus:/work/config
+      # Read-only, and mounted to answer one question: has Prometheus ever
+      # run? An empty directory here means it has not.
+      - ${PROMETHEUS_DATA}:/tsdb:ro
+    networks: [metricwatch]
+    restart: "no"
+    deploy:
+      resources:
+        limits: { cpus: "${INIT_CPU_LIMIT}", memory: "${INIT_MEM_LIMIT}" }
+
+  # -------------------------------------------------------------- prometheus
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION}
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.config.file=/run/secrets/prometheus_web.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME}
+      - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE}
+      - --web.listen-address=0.0.0.0:9090
+      - --web.external-url=https://${CERT_DOMAIN_PROMETHEUS:-${CERT_DOMAIN}}:${PROMETHEUS_PORT}
+      # Required for POST /-/reload, which config-reload uses. The endpoint
+      # sits behind the same basic auth as the rest of the UI.
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/:/etc/prometheus/:ro
+      - ./secrets:/run/secrets:ro
+      - ./certs/prometheus:/certs:ro
+      - ${PROMETHEUS_DATA}:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT}:9090"
+    networks: [metricwatch]
+    depends_on:
+      alertmanager:
+        condition: service_started
+      bootstrap:
+        condition: service_completed_successfully
+      config-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:       { cpus: "${PROMETHEUS_CPU_LIMIT}",   memory: "${PROMETHEUS_MEM_LIMIT}" }
+        reservations: { cpus: "${PROMETHEUS_CPU_RESERVE}", memory: "${PROMETHEUS_MEM_RESERVE}" }
+
+  # ------------------------------------------------------------ alertmanager
+  alertmanager:
+    image: prom/alertmanager:${ALERTMANAGER_VERSION}
+    container_name: alertmanager
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --web.config.file=/run/secrets/alertmanager_web.yml
+      - --storage.path=/alertmanager
+      - --web.external-url=https://${CERT_DOMAIN_ALERTMANAGER:-${CERT_DOMAIN}}:${ALERTMANAGER_PORT}
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+      - ./secrets:/run/secrets:ro
+      - ./certs/alertmanager:/certs:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "${ALERTMANAGER_PORT}:9093"
+    networks: [metricwatch]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:       { cpus: "${ALERTMANAGER_CPU_LIMIT}",   memory: "${ALERTMANAGER_MEM_LIMIT}" }
+        reservations: { cpus: "${ALERTMANAGER_CPU_RESERVE}", memory: "${ALERTMANAGER_MEM_RESERVE}" }
+
+  # ------------------------------------------------------------ node-exporter
+  # Host CPU, memory, disk, filesystem and network, scraped by the
+  # node_exporter job.
+  #
+  # No published port: this is reachable only from the compose network, which
+  # is why it runs without TLS or a password. Do not add a ports: entry --
+  # node_exporter has no authentication of its own, and everything it exposes
+  # is a description of the host.
+  #
+  # --path.rootfs=/host with / mounted at /host is the upstream recipe. The
+  # collectors read the host through that prefix and strip it again before
+  # labelling, so mountpoints come out as / and /home rather than /host and
+  # /host/home -- which also keeps the default filesystem exclusions working.
+  #
+  # On Docker Desktop, / is the Linux VM rather than Windows or macOS, so the
+  # numbers describe the VM. That is the whole of what a container can see.
+  #
+  # It logs one error at startup -- "Failed to open directory, disabling udev
+  # device properties ... /run/udev/data" -- which is expected in a container
+  # and costs only some extra disk labels. Mount /run/udev:/run/udev:ro on a
+  # Linux host if you want them.
+  node-exporter:
+    image: prom/node-exporter:${NODE_EXPORTER_VERSION}
+    container_name: node-exporter
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=0.0.0.0:9100
+    volumes:
+      # On a Linux host, append ,rslave so filesystems mounted after this
+      # container started still show up. Docker Desktop rejects that --
+      # "path / is mounted on / but it is not a shared or slave mount" --
+      # because / inside its VM is not a shared mount, so it is left off.
+      - /:/host:ro
+    # Lets the process collector see the host's processes rather than the
+    # single process inside this container.
+    pid: host
+    # Without this, uname returns the container id, so node_uname_info reports
+    # a nodename that changes every time the container is recreated -- a new
+    # series each time, and a meaningless one on every dashboard that shows it.
+    uts: host
+    networks: [metricwatch]
+    deploy:
+      resources:
+        limits:       { cpus: "${NODE_EXPORTER_CPU_LIMIT}",   memory: "${NODE_EXPORTER_MEM_LIMIT}" }
+        reservations: { cpus: "${NODE_EXPORTER_CPU_RESERVE}", memory: "${NODE_EXPORTER_MEM_RESERVE}" }
+
+  # -------------------------------------------------------- blackbox-exporter
+  # Probes things from outside rather than exporting anything about itself:
+  # ICMP, DNS, TCP and HTTP. How it probes is blackbox/blackbox.yml; what it
+  # probes is prometheus/targets/blackbox-*.yml, one file per probe job. Both
+  # are tracked and ship ready to run.
+  #
+  # Also unpublished. Anyone who can reach it can make it connect anywhere it
+  # can reach, so it stays on the internal network.
+  blackbox-exporter:
+    image: prom/blackbox-exporter:${BLACKBOX_VERSION}
+    container_name: blackbox-exporter
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/blackbox_exporter/blackbox.yml
+      - --web.listen-address=0.0.0.0:9115
+      # At info level a DNS probe logs the whole answer section every time it
+      # runs -- thousands of lines a day saying the probe worked. Nothing is
+      # lost: appending &debug=true to a /probe URL returns the full trace on
+      # demand, whatever this is set to.
+      - --log.level=warn
+    volumes:
+      - ./blackbox:/etc/blackbox_exporter:ro
+    # ICMP needs a raw socket. Without this every ping probe fails with
+    # "socket: operation not permitted" while the others keep working.
+    cap_add:
+      - NET_RAW
+    networks: [metricwatch]
+    deploy:
+      resources:
+        limits:       { cpus: "${BLACKBOX_CPU_LIMIT}",   memory: "${BLACKBOX_MEM_LIMIT}" }
+        reservations: { cpus: "${BLACKBOX_CPU_RESERVE}", memory: "${BLACKBOX_MEM_RESERVE}" }
+
+  # ----------------------------------------------------------- dashboard-init
+  # Assembles ./grafana/dashboards from the GRAFANA_DASHBOARDS list in
+  # .env plus the custom directory, then exits.
+  dashboard-init:
+    image: curlimages/curl:${CURL_VERSION}
+    container_name: dashboard-init
+    entrypoint: ["/bin/sh", "/scripts/fetch-dashboards.sh"]
+    working_dir: /work
+    environment:
+      # Which dashboards to provision, and from where -- all set in .env.
+      GRAFANA_DASHBOARDS: ${GRAFANA_DASHBOARDS}
+      GRAFANA_DATASOURCE: ${GRAFANA_DATASOURCE}
+      GRAFANA_DASHBOARDS_CUSTOM_DIR: /work/${GRAFANA_DASHBOARDS_CUSTOM_DIR}
+      DASHBOARDS_OUT: /work/grafana/dashboards
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./grafana:/work/grafana
+    networks: [metricwatch]
+    restart: "no"
+    deploy:
+      resources:
+        limits: { cpus: "${INIT_CPU_LIMIT}", memory: "${INIT_MEM_LIMIT}" }
+
+  # ------------------------------------------------------------------ grafana
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION}
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      # grafana.ini cannot interpolate .env, and Grafana refuses to start if a
+      # ${VAR} appears inside $__file{}. These GF_* overrides are the only way
+      # to point the admin account and certificate paths at values from .env.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_${GRAFANA_ADMIN_USER}
+      GF_SERVER_CERT_FILE: /certs/${CERT_DOMAIN_GRAFANA:-${CERT_DOMAIN}}/fullchain.pem
+      GF_SERVER_CERT_KEY: /certs/${CERT_DOMAIN_GRAFANA:-${CERT_DOMAIN}}/privkey.pem
+      GF_SERVER_ROOT_URL: https://${CERT_DOMAIN_GRAFANA:-${CERT_DOMAIN}}:${GRAFANA_PORT}
+    volumes:
+      - ./grafana/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - ./secrets:/run/secrets:ro
+      - ./certs/grafana:/certs:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT}:3000"
+    networks: [metricwatch]
+    depends_on:
+      prometheus:
+        condition: service_started
+      bootstrap:
+        condition: service_completed_successfully
+      dashboard-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:       { cpus: "${GRAFANA_CPU_LIMIT}",   memory: "${GRAFANA_MEM_LIMIT}" }
+        reservations: { cpus: "${GRAFANA_CPU_RESERVE}", memory: "${GRAFANA_MEM_RESERVE}" }
+
+  # ------------------------------------------------------------ config-reload
+  # Re-reads the mounted configs on every `docker compose up -d`. Compose only
+  # recreates a container when its own definition changes, so editing a config
+  # file alone would otherwise leave the running process on the old copy.
+  config-reload:
+    image: ${TOOLBOX_IMAGE}
+    container_name: config-reload
+    entrypoint: ["/bin/sh", "/scripts/reload-config.sh"]
+    environment:
+      PROM_URL: https://prometheus:9090
+      ALERT_URL: https://alertmanager:9093
+      BLACKBOX_URL: http://blackbox-exporter:9115
+      SECRETS_DIR: /run/secrets
+      PROMETHEUS_WEB_USER: ${PROMETHEUS_WEB_USER}
+      ALERTMANAGER_WEB_USER: ${ALERTMANAGER_WEB_USER}
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./secrets:/run/secrets:ro
+    networks: [metricwatch]
+    restart: "no"
+    depends_on:
+      prometheus:
+        condition: service_started
+      alertmanager:
+        condition: service_started
+      blackbox-exporter:
+        condition: service_started
+    deploy:
+      resources:
+        limits: { cpus: "${INIT_CPU_LIMIT}", memory: "${INIT_MEM_LIMIT}" }
+
+networks:
+  metricwatch:
+    name: ${NETWORK_NAME}
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${NETWORK_SUBNET}
+
+volumes:
+  alertmanager-data:
+  grafana-data:
+
+
+# Handy queries:
+#
+# topk(20, count by (__name__)({__name__=~".+"}))
+#
+# sort_desc(
+#   count by (hostname) ({hostname=~".+"})
+# )
